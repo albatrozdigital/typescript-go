@@ -18,6 +18,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/locale"
 	"github.com/microsoft/typescript-go/internal/parser"
 	"github.com/microsoft/typescript-go/internal/pprof"
+	"github.com/microsoft/typescript-go/internal/tracing"
 	"github.com/microsoft/typescript-go/internal/tsoptions"
 	"github.com/microsoft/typescript-go/internal/tspath"
 )
@@ -267,12 +268,28 @@ func performIncrementalCompilation(
 	buildInfoReadStart := sys.Now()
 	oldProgram := incremental.ReadBuildInfoProgram(config, incremental.NewBuildInfoReader(host), host)
 	compileTimes.BuildInfoReadTime = sys.Now().Sub(buildInfoReadStart)
-	// todo: cache, statistics, tracing
+
+	// Initialize tracing if generateTrace is set
+	var tr *tracing.Tracing
+	if traceDir := config.CompilerOptions().GenerateTrace; traceDir != "" {
+		var err error
+		configFilePath := ""
+		if config.ConfigFile != nil && config.ConfigFile.SourceFile != nil {
+			configFilePath = config.ConfigFile.SourceFile.FileName()
+		}
+		tr, err = tracing.StartTracing(sys.FS(), traceDir, configFilePath)
+		if err != nil {
+			// Report warning but continue compilation
+			fmt.Fprintf(sys.Writer(), "Warning: Failed to start tracing: %v\n", err)
+		}
+	}
+
 	parseStart := sys.Now()
 	program := compiler.NewProgram(compiler.ProgramOptions{
 		Config:           config,
 		Host:             host,
 		JSDocParsingMode: ast.JSDocParsingModeParseForTypeErrors,
+		Tracing:          tr,
 	})
 	compileTimes.ParseTime = sys.Now().Sub(parseStart)
 	changesComputeStart := sys.Now()
@@ -289,6 +306,14 @@ func performIncrementalCompilation(
 		CompileTimes:       compileTimes,
 		Testing:            testing,
 	})
+
+	// Stop tracing and write output files
+	if tr != nil {
+		if err := tr.StopTracing(); err != nil {
+			fmt.Fprintf(sys.Writer(), "Warning: Failed to stop tracing: %v\n", err)
+		}
+	}
+
 	if testing != nil {
 		testing.OnProgram(incrementalProgram)
 	}
@@ -307,12 +332,28 @@ func performCompilation(
 	testing tsc.CommandLineTesting,
 ) tsc.CommandLineResult {
 	host := compiler.NewCachedFSCompilerHost(sys.GetCurrentDirectory(), sys.FS(), sys.DefaultLibraryPath(), extendedConfigCache, getTraceFromSys(sys, config.Locale(), testing))
-	// todo: cache, statistics, tracing
+
+	// Initialize tracing if generateTrace is set
+	var tr *tracing.Tracing
+	if traceDir := config.CompilerOptions().GenerateTrace; traceDir != "" {
+		var err error
+		configFilePath := ""
+		if config.ConfigFile != nil && config.ConfigFile.SourceFile != nil {
+			configFilePath = config.ConfigFile.SourceFile.FileName()
+		}
+		tr, err = tracing.StartTracing(sys.FS(), traceDir, configFilePath)
+		if err != nil {
+			// Report warning but continue compilation
+			fmt.Fprintf(sys.Writer(), "Warning: Failed to start tracing: %v\n", err)
+		}
+	}
+
 	parseStart := sys.Now()
 	program := compiler.NewProgram(compiler.ProgramOptions{
 		Config:           config,
 		Host:             host,
 		JSDocParsingMode: ast.JSDocParsingModeParseForTypeErrors,
+		Tracing:          tr,
 	})
 	compileTimes.ParseTime = sys.Now().Sub(parseStart)
 	result, _ := tsc.EmitAndReportStatistics(tsc.EmitInput{
@@ -326,6 +367,14 @@ func performCompilation(
 		CompileTimes:       compileTimes,
 		Testing:            testing,
 	})
+
+	// Stop tracing and write output files
+	if tr != nil {
+		if err := tr.StopTracing(); err != nil {
+			fmt.Fprintf(sys.Writer(), "Warning: Failed to stop tracing: %v\n", err)
+		}
+	}
+
 	return tsc.CommandLineResult{
 		Status: result.Status,
 	}

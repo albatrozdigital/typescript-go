@@ -9,6 +9,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/checker"
 	"github.com/microsoft/typescript-go/internal/core"
+	"github.com/microsoft/typescript-go/internal/tracing"
 )
 
 type CheckerPool interface {
@@ -23,6 +24,7 @@ type CheckerPool interface {
 type checkerPool struct {
 	checkerCount int
 	program      *Program
+	tracing      *tracing.Tracing
 
 	createCheckersOnce sync.Once
 	checkers           []*checker.Checker
@@ -33,6 +35,10 @@ type checkerPool struct {
 var _ CheckerPool = (*checkerPool)(nil)
 
 func newCheckerPool(program *Program) *checkerPool {
+	return newCheckerPoolWithTracing(program, nil)
+}
+
+func newCheckerPoolWithTracing(program *Program, tr *tracing.Tracing) *checkerPool {
 	checkerCount := 4
 	if program.SingleThreaded() {
 		checkerCount = 1
@@ -47,6 +53,7 @@ func newCheckerPool(program *Program) *checkerPool {
 		checkerCount: checkerCount,
 		checkers:     make([]*checker.Checker, checkerCount),
 		locks:        make([]*sync.Mutex, checkerCount),
+		tracing:      tr,
 	}
 
 	return pool
@@ -83,7 +90,11 @@ func (p *checkerPool) createCheckers() {
 		wg := core.NewWorkGroup(p.program.SingleThreaded())
 		for i := range p.checkerCount {
 			wg.Queue(func() {
-				p.checkers[i], p.locks[i] = checker.NewChecker(p.program)
+				var tracer checker.TypeTracer
+				if p.tracing != nil {
+					tracer = checker.NewTracingTypeTracer(p.tracing.NewTypeTracer(i))
+				}
+				p.checkers[i], p.locks[i] = checker.NewCheckerWithTracer(p.program, tracer)
 			})
 		}
 

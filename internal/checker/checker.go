@@ -860,14 +860,20 @@ type Checker struct {
 	withinUnreachableCode                       bool
 	reportedUnreachableNodes                    collections.Set[*ast.Node]
 
-	mu sync.Mutex
+	mu     sync.Mutex
+	tracer TypeTracer // Optional tracer for recording types (for --generateTrace)
 }
 
 func NewChecker(program Program) (*Checker, *sync.Mutex) {
+	return NewCheckerWithTracer(program, nil)
+}
+
+func NewCheckerWithTracer(program Program, tracer TypeTracer) (*Checker, *sync.Mutex) {
 	program.BindSourceFiles()
 
 	c := &Checker{}
 	c.id = nextCheckerID.Add(1)
+	c.tracer = tracer
 	c.program = program
 	c.compilerOptions = program.Options()
 	c.files = program.SourceFiles()
@@ -24379,6 +24385,9 @@ func (c *Checker) newType(flags TypeFlags, objectFlags ObjectFlags, data TypeDat
 	t.id = TypeId(c.TypeCount)
 	t.checker = c
 	t.data = data
+	if c.tracer != nil {
+		c.tracer.RecordType(t)
+	}
 	return t
 }
 
