@@ -68,6 +68,7 @@ const { values: rawOptions } = parseArgs({
         noembed: { type: "boolean", default: parseEnvBoolean("NOEMBED") },
         concurrentTestPrograms: { type: "boolean", default: parseEnvBoolean("CONCURRENT_TEST_PROGRAMS") },
         coverage: { type: "boolean", default: parseEnvBoolean("COVERAGE") },
+        allPlatforms: { type: "boolean" },
     },
     strict: false,
     allowPositionals: true,
@@ -743,6 +744,8 @@ const builtNpm = path.resolve("./built/npm");
 const builtVsix = path.resolve("./built/vsix");
 const builtSignTmp = path.resolve("./built/sign-tmp");
 
+const packagesDir = path.resolve("./packages");
+
 const getSignTempDir = memoize(async () => {
     const dir = path.resolve(builtSignTmp);
     await rimraf(dir);
@@ -971,6 +974,8 @@ const mainNativePreviewPackage = {
     npmPackageName: "@typescript/native-preview",
     npmDir: path.join(builtNpm, "native-preview"),
     npmTarball: path.join(builtNpm, "native-preview.tgz"),
+    gitDir: path.join(packagesDir, "native-preview"),
+    gitTarball: path.join(packagesDir, "native-preview.tgz"),
 };
 
 /**
@@ -994,7 +999,7 @@ const nativePreviewPlatforms = memoize(() => {
         // Wasm?
     ];
 
-    if (!options.forRelease) {
+    if (!options.forRelease || !options.allPlatforms) {
         supportedPlatforms = supportedPlatforms.filter(([os, arch]) => os === process.platform && arch === process.arch);
         assert.equal(supportedPlatforms.length, 1, "No supported platforms found");
     }
@@ -1004,6 +1009,8 @@ const nativePreviewPlatforms = memoize(() => {
         const npmDir = path.join(builtNpm, npmDirName);
         const npmTarball = `${npmDir}.tgz`;
         const npmPackageName = `@typescript/${npmDirName}`;
+        const gitDir = path.join(packagesDir, npmDirName);
+        const gitTarball = `${gitDir}.tgz`;
 
         /** @type {VSCodeTarget[]} */
         const vscodeTargets = [`${os}-${arch === "arm" ? "armhf" : arch}`];
@@ -1034,6 +1041,8 @@ const nativePreviewPlatforms = memoize(() => {
             npmDirName,
             npmDir,
             npmTarball,
+            gitDir,
+            gitTarball,
             extensions,
             cert,
         };
@@ -1141,6 +1150,89 @@ export const buildNativePreviewPackages = task({
             ];
 
             fs.promises.writeFile(path.join(npmDir, "README.md"), readme.join("\n") + "\n");
+
+            await Promise.all([
+                generateLibs(out),
+                buildLimit(() =>
+                    buildTsgo({
+                        out,
+                        env: { GOOS: goos, GOARCH: goarch, GOARM: "6", CGO_ENABLED: "0" },
+                        extraFlags,
+                    })
+                ),
+            ]);
+        }));
+    },
+});
+
+export const buildPackages = task({
+    name: "build:packages",
+    run: async () => {
+        await rimraf(packagesDir);
+
+        const platforms = nativePreviewPlatforms();
+
+        const inputDir = "./_packages/native-preview";
+
+        const inputPackageJson = JSON.parse(fs.readFileSync(path.join(inputDir, "package.json"), "utf8"));
+        inputPackageJson.version = getVersion();
+        delete inputPackageJson.private;
+        delete inputPackageJson.engines;
+        
+
+        const { stdout: gitHead } = await $pipe`git rev-parse HEAD`;
+        inputPackageJson.gitHead = gitHead;
+
+        const gitUrl = "https://github.com/albatrozdigital/typescript-go.git;"
+
+        const mainPackage = {
+            ...inputPackageJson,
+            optionalDependencies: Object.fromEntries(platforms.map(p => [p.npmPackageName, `git+${gitUrl}#main:path:packages/${p.npmDirName}`])),
+        };
+
+        const mainPackageDir = mainNativePreviewPackage.gitDir;
+
+        await fs.promises.mkdir(mainPackageDir, { recursive: true });
+
+        await cpWithoutNodeModulesOrTsconfig(inputDir, mainPackageDir);
+
+        await fs.promises.writeFile(path.join(mainPackageDir, "package.json"), JSON.stringify(mainPackage, undefined, 4));
+        await fs.promises.copyFile("LICENSE", path.join(mainPackageDir, "LICENSE"));
+        // No NOTICE.txt here; does not ship the binary or libs. If this changes, we should add it.
+
+        let ldflags = "-ldflags=-s -w";
+        if (options.setPrerelease) {
+            ldflags += ` -X github.com/microsoft/typescript-go/internal/core.version=${getVersion()}`;
+        }
+        const extraFlags = ["-trimpath", ldflags];
+
+        const buildLimit = pLimit(os.availableParallelism());
+
+        await Promise.all(platforms.map(async ({ gitDir, npmPackageName, nodeOs, nodeArch, goos, goarch }) => {
+            const packageJson = {
+                ...inputPackageJson,
+                bin: undefined,
+                imports: undefined,
+                name: npmPackageName,
+                os: [nodeOs],
+                cpu: [nodeArch],
+                exports: {
+                    "./package.json": "./package.json",
+                },
+            };
+
+            const out = path.join(gitDir, "lib");
+            await fs.promises.mkdir(out, { recursive: true });
+            await fs.promises.writeFile(path.join(gitDir, "package.json"), JSON.stringify(packageJson, undefined, 4));
+            await fs.promises.copyFile("LICENSE", path.join(gitDir, "LICENSE"));
+            await fs.promises.copyFile("NOTICE.txt", path.join(gitDir, "NOTICE.txt"));
+            const readme = [
+                `# \`${npmPackageName}\``,
+                "",
+                `This package provides ${nodeOs}-${nodeArch} support for [${mainNativePreviewPackage.npmPackageName}](${gitUrl}/packages/${mainNativePreviewPackage.npmPackageName}).`,
+            ];
+
+            fs.promises.writeFile(path.join(gitDir, "README.md"), readme.join("\n") + "\n");
 
             await Promise.all([
                 generateLibs(out),
